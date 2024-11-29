@@ -3,9 +3,13 @@
 
 This repository contains a minimal implementation of comparing adam with non-adam optimizers , for now it's muon, most of the code here is from @cloneofsimo's minRF repository, I have just added the optimizers, sweeps and some other minor changes.
 
+I initially thought muon might struggle with diffusion since there's a lot of gradient noise, but it seems to be doing fine, I will be adding more optimizers and datasets to this repo, prs are welcome.
 
+![alt text](muon_pg.png)
+![alt text](muon_2.png)
+![alt text](muon_1.png)
 
-# 1. *Simple* Rectified Flow, for beginners
+# 1. Adam vs New Optimizers (??)
 
 Install torch, pil, torchvision and muon!
 
@@ -28,7 +32,12 @@ number_of_gpus=8
 jobs_per_gpu=2
 ```
 
+then do
+```
+./sweep.sh
+```
 
+(much of this work is based on @cloneofsimo's minRF repository)
 # Citations
 
 ```bibtex
