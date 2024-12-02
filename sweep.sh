@@ -1,19 +1,29 @@
 #!/bin/bash
 
 # Adam learning rates
-ADAM_LRS=("5e-4" "3e-4" "1e-4" "7e-4")
+ADAM_LRS=("8e-4" "5e-4" "1e-4" "5e-5")
+PSGD_LRS=("1e-3" "5e-4" "1e-4" "5e-5")
+PSGD_MOMENTUMS=("0.9" "0.95" "0.99")
 # Muon learning rates
-MUON_LRS=("0.01" "0.02" "0.007" "0.015")
+MUON_LRS=("0.01" "0.02" "0.007" "0.005")
 # Beta options
-BETAS=("0.9/0.95" "0.95/0.99")
+BETAS=("0.9/0.95" "0.95/0.99" "0.95/0.95")
 # Batch sizes
-BATCH_SIZES=("256" "512")
+BATCH_SIZES=("512" "1024")
 
 # Trap Ctrl+C and kill all background processes
 trap 'echo "Ctrl+C pressed. Killing all experiments..."; kill $(jobs -p) 2>/dev/null; exit 1' SIGINT
 
 # Create array to store all commands
 declare -a commands
+
+for lr in "${PSGD_LRS[@]}"; do
+    for beta in "${PSGD_MOMENTUMS[@]}"; do
+        for bs in "${BATCH_SIZES[@]}"; do
+            commands+=("--optim psgd --psgd_lr ${lr} --momentum ${beta} --batch_size ${bs}")
+        done
+    done
+done
 
 # Add Adam experiments
 for lr in "${ADAM_LRS[@]}"; do
@@ -24,7 +34,16 @@ for lr in "${ADAM_LRS[@]}"; do
     done
 done
 
-# Add Muon experiments
+# Add soap
+for lr in "${ADAM_LRS[@]}"; do
+    for beta in "${BETAS[@]}"; do
+        for bs in "${BATCH_SIZES[@]}"; do
+            commands+=("--optim soap --adam_lr ${lr} --beta_option ${beta} --batch_size ${bs}")
+        done
+    done
+done
+
+# # Add Muon experiments
 for mlr in "${MUON_LRS[@]}"; do
     for alr in "${ADAM_LRS[@]}"; do
         for beta in "${BETAS[@]}"; do

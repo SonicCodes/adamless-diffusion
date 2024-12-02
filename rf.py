@@ -3,7 +3,7 @@ import argparse
 
 import torch
 from muon import Muon
-
+import heavyball
 
 class RF:
     def __init__(self, model, ln=True):
@@ -37,7 +37,7 @@ class RF:
         for i in range(sample_steps, 0, -1):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device)
-
+            z, t, cond = z.bfloat16(), t.bfloat16(), cond.long()
             vc = self.model(z, t, cond)
             if null_cond is not None:
                 vu = self.model(z, t, null_cond)
@@ -50,6 +50,7 @@ class RF:
 adam_beta_options = {
     "0.9/0.95": (0.90, 0.95),
     "0.95/0.99": (0.95, 0.99),
+    "0.95/0.95": (0.95, 0.95),
 }
 def muon_optimizer(model, lr=0.01, lr2=5e-4, momentum=0.95, beta_option="0.9/0.95"):
     muon_params = []
@@ -73,6 +74,13 @@ def adam_optimizer(model, lr=5e-4, beta_option="0.9/0.95"):
     beta_opts = adam_beta_options[beta_option]
     return torch.optim.Adam(model.parameters(), lr=lr, betas=beta_opts)
 
+def psgd_optimizer(model, lr=5e-4, b1=0.9): #psgd only has one beta
+    return heavyball.PSGDKron(model.parameters(), lr=lr, beta=b1)
+
+def soap_optimizer(model, lr=5e-4, beta_option="0.9/0.95"):
+    (beta, sbeta) = adam_beta_options[beta_option]
+    return heavyball.PrecondSchedulePaLMSOAP(model.parameters(), lr=lr, beta=beta, shampoo_beta=sbeta)
+
 @torch.no_grad()
 def calculate_val_loss(model, rf, val_dataloader):
     model.eval()
@@ -94,6 +102,46 @@ def calculate_val_loss(model, rf, val_dataloader):
     model.train()
     return avg_loss, val_lossbin, val_losscnt
 
+def sample(rf, run_name):
+    rf.model.eval()
+    with torch.no_grad():
+        for cd_id in [3, 4, 6]:
+            cond = torch.zeros(16).cuda() + cd_id
+            uncond = torch.ones_like(cond) * 10
+            # generator ith seed of 0
+            init_noise = torch.randn(16, channels, 32, 32, generator= torch.Generator().manual_seed(0) ).cuda()
+            images = rf.sample(init_noise, cond, uncond)
+            # image sequences to gif
+            gif = []
+            for image in images:
+                # unnormalize
+                image = image * 0.5 + 0.5
+                image = image.clamp(0, 1)
+                x_as_image = make_grid(image.float(), nrow=4)
+                img = x_as_image.permute(1, 2, 0).cpu().numpy()
+                img = (img * 255).astype(np.uint8)
+                gif.append(Image.fromarray(img))
+
+            gif[0].save(
+                f"contents/sample_{run_name}_{epoch}.gif",
+                save_all=True,
+                append_images=gif[1:],
+                duration=100,
+                loop=0,
+            )
+
+            # wandb log
+            wandb.log({
+                f"sample_{cd_id}": wandb.Image(f"contents/sample_{run_name}_{epoch}.gif"),
+                f"sample_{cd_id}_last": wandb.Image(f"contents/sample_{run_name}_{epoch}_last.png")
+                       })
+            
+
+            # last_img = gif[-1]
+            # last_img.save(f"contents/sample_{run_name}_{epoch}_last.png")
+
+    rf.model.train()
+
 if __name__ == "__main__":
     # train class conditional RF on mnist.
     # set seed to 12
@@ -114,6 +162,7 @@ if __name__ == "__main__":
     # muon lr , adam lr , momentum hps
     parser.add_argument("--muon_lr", type=float, default=0.01)
     parser.add_argument("--adam_lr", type=float, default=5e-4)
+    parser.add_argument("--psgd_lr", type=float, default=5e-4)
     parser.add_argument("--momentum", type=float, default=0.95)
     parser.add_argument("--optim", type=str, default="adam")
     # beta options for adam ya know
@@ -123,7 +172,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     CIFAR = args.cifar
-    MLR, ALR, MOMENTUM, OPTIM, BETA_OPTS, BATCH_SIZE = args.muon_lr, args.adam_lr, args.momentum, args.optim, args.beta_option, args.batch_size
+    MLR, ALR, MOMENTUM, OPTIM, BETA_OPTS, BATCH_SIZE, PSGD_LR = args.muon_lr, args.adam_lr, args.momentum, args.optim, args.beta_option, args.batch_size, args.psgd_lr
 
 
     if CIFAR:
@@ -172,8 +221,13 @@ if __name__ == "__main__":
     # optimizer = optim.Adam(model.parameters(), lr=5e-4)
     if OPTIM == "adam":
         optimizer = adam_optimizer(model, lr=ALR, beta_option=BETA_OPTS)
-    else:
+    elif OPTIM == "muon":
         optimizer = muon_optimizer(model, lr=MLR, lr2=ALR, momentum=MOMENTUM, beta_option=BETA_OPTS)
+    elif OPTIM == "psgd":
+        optimizer = psgd_optimizer(model, lr=PSGD_LR, b1=MOMENTUM)
+    elif OPTIM == "soap":
+        optimizer = soap_optimizer(model, lr=ALR, beta_option=BETA_OPTS)
+
 
     
     # optimizer = muon_optimizer(model)
@@ -183,7 +237,16 @@ if __name__ == "__main__":
     dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     val_dataset = fdatasets(root="./data", train=False, download=True, transform=transform)
     val_dataloader = DataLoader(val_dataset, batch_size=512, shuffle=False, drop_last=True)
-    add_hp = f"{MLR}/{ALR}_{MOMENTUM}" if OPTIM == "muon" else f"{ALR}"
+    add_hp = ""#f"{MLR}/{ALR}_{MOMENTUM}" if OPTIM == "muon" else (f"{ALR}" if OPTIM == "adam" else f"{PSGD_LR}_{MOMENTUM}")
+    if OPTIM == "muon":
+        add_hp += f"{MLR}/{ALR}_{MOMENTUM}"
+    elif OPTIM == "adam":
+        add_hp += f"{ALR}"
+    elif OPTIM == "psgd":
+        add_hp += f"{PSGD_LR}_{MOMENTUM}"
+    elif OPTIM == "soap":
+        add_hp += f"{ALR}"
+
     run_name = f"{OPTIM}_{add_hp}_{BETA_OPTS}_{BATCH_SIZE}"
     run_cfg = {
         "muon_lr": MLR,
@@ -192,13 +255,14 @@ if __name__ == "__main__":
         "momentum": MOMENTUM,
         "beta_opts": BETA_OPTS,
         "batch_size": BATCH_SIZE,
+        "psgd_lr": PSGD_LR
     }
 
     wandb.init(project=f"rf_{dataset_name}", name=run_name, config=run_cfg)
 
     n_sample = 0
     global_step = 0
-    for epoch in range(10):
+    for epoch in range(50):
         lossbin = {i: 0 for i in range(10)}
         losscnt = {i: 1e-6 for i in range(10)}
 
@@ -243,6 +307,9 @@ if __name__ == "__main__":
         bin_losses["epoch_loss"] = np.mean(losses)
         
         wandb.log(bin_losses, step=global_step)
+
+        # sample(rf, run_name)
+        # print("sample done")
 
         
 
